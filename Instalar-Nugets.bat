@@ -19,7 +19,8 @@ $logPath = $null
 
 function Read-Answer {
     param([string]$Label, [string]$Default, [string]$Color = 'Cyan')
-    Write-Host "$Label [$Default]: " -ForegroundColor $Color -NoNewline
+    $prompt = if ([string]::IsNullOrWhiteSpace($Default)) { "$($Label): " } else { "$Label [$Default]: " }
+    Write-Host $prompt -ForegroundColor $Color -NoNewline
     $answer = Read-Host
     if ([string]::IsNullOrWhiteSpace($answer)) { return $Default }
     return $answer.Trim().Trim('"')
@@ -62,11 +63,27 @@ function Find-Files {
 function Select-Number {
     param([string]$Label, [int]$Count, [int]$Default = 1, [int[]]$Excluded = @(), [string]$Color = 'Cyan')
     while ($true) {
-        $answer = Read-Answer $Label ([string]$Default) $Color
+        $defaultText = if ($Default -gt 0) { [string]$Default } else { '' }
+        $answer = Read-Answer $Label $defaultText $Color
         $number = 0
         if ([int]::TryParse($answer, [ref]$number) -and $number -ge 1 -and $number -le $Count -and $Excluded -notcontains $number) { return $number }
         Write-Host 'Elige un numero de la lista que no hayas usado para otra capa.' -ForegroundColor Yellow
     }
+}
+
+function Get-LayerDefault {
+    param([object[]]$Projects, [string]$Role, [int[]]$Excluded = @())
+    $pattern = switch ($Role) {
+        'Infrastructure' { '(?i)(^|\.)(infra|infrastructure|infraestructure|infraestructura)$' }
+        'Application' { '(?i)(^|\.)(application|aplication|aplicacion|app)$' }
+        default { throw "Capa desconocida: $Role" }
+    }
+    $candidates = @(for ($index = 0; $index -lt $Projects.Count; $index++) {
+        if ($Excluded -notcontains ($index + 1) -and $Projects[$index].Name -match $pattern) { $index + 1 }
+    })
+    if ($candidates.Count -eq 1) { return $candidates[0] }
+    # Sin coincidencia unica, pedir una seleccion explicita en lugar de adivinar.
+    return 0
 }
 
 function Get-ProjectInfo {
@@ -185,11 +202,9 @@ try {
     $apiDefault = 1
     for ($index = 0; $index -lt $projects.Count; $index++) { if ($projects[$index].Web) { $apiDefault = $index + 1; break } }
     $apiIndex = Select-Number 'API ejecutable' $projects.Count $apiDefault @() 'Green'
-    $infraDefault = (1..$projects.Count | Where-Object { $_ -ne $apiIndex } | Select-Object -First 1)
-    for ($index = 0; $index -lt $projects.Count; $index++) { if ($index + 1 -ne $apiIndex -and $projects[$index].Name -match '(?i)\.(infra|infrastructure|infraestructura)$') { $infraDefault = $index + 1; break } }
+    $infraDefault = Get-LayerDefault $projects 'Infrastructure' @($apiIndex)
     $infraIndex = Select-Number 'Base de datos / infraestructura' $projects.Count $infraDefault @($apiIndex) 'Yellow'
-    $appDefault = (1..$projects.Count | Where-Object { $_ -notin @($apiIndex, $infraIndex) } | Select-Object -First 1)
-    for ($index = 0; $index -lt $projects.Count; $index++) { if ($index + 1 -notin @($apiIndex, $infraIndex) -and $projects[$index].Name -match '(?i)\.(application|aplicacion)$') { $appDefault = $index + 1; break } }
+    $appDefault = Get-LayerDefault $projects 'Application' @($apiIndex, $infraIndex)
     $appIndex = Select-Number 'Casos de uso / aplicacion' $projects.Count $appDefault @($apiIndex, $infraIndex) 'Cyan'
     $api = $projects[$apiIndex - 1]
     $infra = $projects[$infraIndex - 1]
