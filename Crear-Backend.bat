@@ -44,6 +44,30 @@ function Invoke-Dotnet {
     return $output
 }
 
+function Get-CSharpNamespace {
+    param([string]$Name)
+    $keywords = 'abstract as base bool break byte case catch char checked class const continue decimal default delegate do double else enum event explicit extern false finally fixed float for foreach goto if implicit in int interface internal is lock long namespace new null object operator out override params private protected public readonly ref return sbyte sealed short sizeof stackalloc static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using virtual void volatile while'.Split(' ')
+    return (($Name.Split('.') | ForEach-Object { if ($keywords -ccontains $_) { '@' + $_ } else { $_ } }) -join '.')
+}
+
+function New-GuideFolder {
+    param([string]$ProjectFolder, [string]$ProjectNamespace, [string]$Folder, [string]$Description, [string]$Examples)
+    $path = Join-Path $ProjectFolder $Folder
+    New-Item -ItemType Directory -Path $path -Force | Out-Null
+    $namespace = Get-CSharpNamespace ($ProjectNamespace + '.' + $Folder.Replace('/', '.'))
+    $guide = @"
+namespace $namespace;
+
+// $Description
+// Ejemplos: $Examples
+// Archivo guia: reemplazalo por tus clases cuando implementes esta carpeta.
+internal sealed class Class1
+{
+}
+"@
+    [IO.File]::WriteAllText((Join-Path $path 'Class1.cs'), $guide, [Text.UTF8Encoding]::new($false))
+}
+
 try {
     Write-Host ''
     Write-Host '  PREPARAR BACKEND' -ForegroundColor Cyan
@@ -130,6 +154,56 @@ try {
             Invoke-Dotnet -Arguments $referenceArguments | Out-Null
         }
         Write-Host '  OK  Dependencias configuradas' -ForegroundColor Green
+
+        $folderPlan = @(
+            @{ Project = $domain; Folder = 'Entities'; Description = 'Entidades con identidad y reglas del negocio; no son simples copias de tablas.'; Examples = 'Perfil.cs, Pedido.cs, Producto.cs' },
+            @{ Project = $domain; Folder = 'ValueObjects'; Description = 'Valores sin identidad propia, comparados por su contenido y validos desde su creacion.'; Examples = 'Dinero.cs (monto y moneda), Email.cs, Direccion.cs' },
+            @{ Project = $domain; Folder = 'Enums'; Description = 'Opciones y estados definidos por el negocio.'; Examples = 'EstadoPedido.cs, TipoDocumento.cs' },
+            @{ Project = $domain; Folder = 'Exceptions'; Description = 'Errores al incumplir reglas del dominio; no contienen detalles HTTP ni de base de datos.'; Examples = 'DomainException.cs, PerfilInvalidoException.cs' },
+            @{ Project = $domain; Folder = 'Events'; Description = 'Hechos del negocio que ya ocurrieron. Su uso es opcional; no implica instalar un broker.'; Examples = 'PedidoCreadoEvent.cs' },
+            @{ Project = $domain; Folder = 'Common'; Description = 'Elementos del dominio compartidos que realmente necesiten varias entidades.'; Examples = 'EntidadBase.cs, si aporta comportamiento comun' },
+            @{ Project = $application; Folder = 'UseCases'; Description = 'Acciones de la aplicacion: coordinan entidades y servicios mediante interfaces. Las invariantes de las entidades viven en Domain.'; Examples = 'RegistrarUsuario.cs, ObtenerPerfil.cs, CrearPedido.cs; se agrupan por funcionalidad' },
+            @{ Project = $application; Folder = 'UseCases/Usuarios'; Description = 'Casos de uso para registrar usuarios y consultar sus perfiles.'; Examples = 'RegistrarUsuario.cs, ObtenerPerfil.cs' },
+            @{ Project = $application; Folder = 'UseCases/Pedidos'; Description = 'Casos de uso relacionados con pedidos. Carpeta de ejemplo, adaptala a tu sistema.'; Examples = 'CrearPedido.cs' },
+            @{ Project = $application; Folder = 'DTOs'; Description = 'Datos de entrada y salida de los casos de uso; no incluyen DbContext ni comportamiento de persistencia.'; Examples = 'RegistroRequest.cs, PerfilResponse.cs' },
+            @{ Project = $application; Folder = 'Validators'; Description = 'Validacion de solicitudes con FluentValidation: formato, campos requeridos y longitudes. No reemplaza las reglas de Domain.'; Examples = 'RegistroRequestValidator.cs' },
+            @{ Project = $application; Folder = 'Interfaces'; Description = 'Contratos de los servicios externos y de persistencia que necesitan los casos de uso.'; Examples = 'IIdentidadService.cs, IPerfilRepository.cs, IUnitOfWork.cs si hace falta, IEmailService.cs, IArchivoStorage.cs' },
+            @{ Project = $application; Folder = 'Mappings'; Description = 'Conversiones entre entidades y DTOs: manuales, AutoMapper o Mapperly.'; Examples = 'PerfilMapper.cs' },
+            @{ Project = $application; Folder = 'Common'; Description = 'Resultados y elementos compartidos por los casos de uso.'; Examples = 'Result.cs, excepciones de aplicacion' },
+            @{ Project = $infrastructure; Folder = 'Persistence'; Description = 'Acceso a la base de datos mediante EF Core; implementa contratos de Application.'; Examples = 'AppDbContext.cs' },
+            @{ Project = $infrastructure; Folder = 'Persistence/Configurations'; Description = 'Mapeo de entidades a tablas y restricciones mediante Fluent API de EF Core.'; Examples = 'PerfilConfiguration.cs' },
+            @{ Project = $infrastructure; Folder = 'Persistence/Migrations'; Description = 'Cambios de esquema generados por EF Core. Esta guia no es una migracion; usa carpetas separadas por proveedor cuando corresponda.'; Examples = 'Archivos generados por dotnet ef migrations add' },
+            @{ Project = $infrastructure; Folder = 'Persistence/Models'; Description = 'Modelos de persistencia generados desde la base de datos si usas Database First. No son automaticamente tu modelo del negocio.'; Examples = 'Perfil.cs o Pedido.cs generados mediante scaffold, si se necesitan' },
+            @{ Project = $infrastructure; Folder = 'Persistence/Repositories'; Description = 'Implementaciones de acceso a datos que utilizan el DbContext.'; Examples = 'PerfilRepository.cs implementa IPerfilRepository' },
+            @{ Project = $infrastructure; Folder = 'Identity'; Description = 'Integracion con ASP.NET Core Identity y servicios de autenticacion; credenciales y persistencia de cuentas.'; Examples = 'AppUser.cs (IdentityUser), IdentidadService.cs (IIdentidadService)' },
+            @{ Project = $infrastructure; Folder = 'Caching'; Description = 'Implementaciones de cache y sus reglas de expiracion e invalidacion.'; Examples = 'RedisCacheService.cs, adaptador de HybridCache' },
+            @{ Project = $infrastructure; Folder = 'Files'; Description = 'Implementaciones de almacenamiento y acceso a archivos.'; Examples = 'ArchivoStorageService.cs para disco, S3, Azure Blob o Supabase' },
+            @{ Project = $infrastructure; Folder = 'Email'; Description = 'Implementaciones para enviar correos mediante un proveedor externo.'; Examples = 'SmtpEmailService.cs implementa IEmailService' },
+            @{ Project = $api; Folder = 'Controllers'; Description = 'Endpoints HTTP: reciben DTOs, invocan casos de uso y devuelven respuestas.'; Examples = 'RegistroController.cs' },
+            @{ Project = $api; Folder = 'Middleware'; Description = 'Comportamiento transversal de las peticiones HTTP, como convertir errores en respuestas.'; Examples = 'ManejoErroresMiddleware.cs' }
+        )
+        foreach ($name in @($domain, $application, $infrastructure)) {
+            $sampleFile = Join-Path (Split-Path -Parent (Join-Path $destination $relativePaths[$name])) 'Class1.cs'
+            if (Test-Path -LiteralPath $sampleFile) { Remove-Item -LiteralPath $sampleFile -Force }
+        }
+        foreach ($entry in $folderPlan) {
+            $projectFolder = Split-Path -Parent (Join-Path $destination $relativePaths[$entry.Project])
+            New-GuideFolder $projectFolder $entry.Project $entry.Folder $entry.Description $entry.Examples
+        }
+        $infrastructureFolder = Split-Path -Parent (Join-Path $destination $relativePaths[$infrastructure])
+        $infrastructureNamespace = Get-CSharpNamespace $infrastructure
+        $dependencyGuide = @"
+namespace $infrastructureNamespace;
+
+// Aqui se registraran DbContext y servicios de Infrastructure en el contenedor de dependencias.
+// Ejemplo futuro: AddInfrastructure recibe la configuracion y registra las implementaciones de Application.
+// Se implementara al configurar esos servicios; esta clase guia todavia no los registra.
+internal static class DependencyInjection
+{
+}
+"@
+        [IO.File]::WriteAllText((Join-Path $infrastructureFolder 'DependencyInjection.cs'), $dependencyGuide, [Text.UTF8Encoding]::new($false))
+        Write-Host '  OK  Carpetas y clases guia' -ForegroundColor Green
 
         Write-Host '  Instalando Swagger...' -ForegroundColor Cyan
         Invoke-Dotnet -Arguments @('add', $relativePaths[$api], 'package', 'Swashbuckle.AspNetCore', '--version', '10.2.3', '--no-restore') | Out-Null
