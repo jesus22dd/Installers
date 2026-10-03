@@ -123,6 +123,34 @@ function Read-PackageVersion {
     return $answer
 }
 
+function Get-CompatibleMySqlVersions {
+    param([string]$Framework, [string]$EfVersion)
+    $ef = [version]$EfVersion
+    # El numero del paquete MySQL no determina su version de EF: puede ser multitarget.
+    foreach ($version in (Get-PackageVersions 'MySql.EntityFrameworkCore' | Sort-Object { [version]$_ } -Descending)) {
+        $uri = "https://api.nuget.org/v3-flatcontainer/mysql.entityframeworkcore/$version/mysql.entityframeworkcore.nuspec"
+        try { [xml]$spec = Invoke-RestMethod -Uri $uri -TimeoutSec 30 }
+        catch { throw "No se pudo verificar MySql.EntityFrameworkCore $version en NuGet.org. $($_.Exception.Message)" }
+        $group = @($spec.package.metadata.dependencies.group | Where-Object { $_.targetFramework -eq $Framework })
+        if ($group.Count -ne 1) { continue }
+        $dependencies = @($group[0].dependency | Where-Object { $_.id -in @('Microsoft.EntityFrameworkCore', 'Microsoft.EntityFrameworkCore.Relational') })
+        if ($dependencies.Count -ne 2) { continue }
+        $compatible = $true
+        foreach ($dependency in $dependencies) {
+            $range = [string]$dependency.version
+            if ($range -match '^\d+\.\d+\.\d+$') {
+                $minimum = [version]$range
+                if ($minimum.Major -ne $ef.Major -or $ef -lt $minimum) { $compatible = $false }
+            } elseif ($range -match '^([\[\(])(\d+\.\d+\.\d+),\s*(\d+\.\d+\.\d+)?([\]\)])$') {
+                $lowerSign, $lower, $upper, $upperSign = $Matches[1], $Matches[2], $Matches[3], $Matches[4]
+                if (([version]$lower).Major -ne $ef.Major -or $ef -lt [version]$lower -or ($lowerSign -eq '(' -and $ef -eq [version]$lower)) { $compatible = $false }
+                if ($upper -and ($ef -gt [version]$upper -or ($upperSign -eq ')' -and $ef -eq [version]$upper))) { $compatible = $false }
+            } else { $compatible = $false }
+        }
+        if ($compatible) { $version }
+    }
+}
+
 function Save-Backup {
     param([string]$Path)
     if (-not $backups.ContainsKey($Path)) {
@@ -243,6 +271,7 @@ try {
     }
     $microsoftVersion = Read-PackageVersion "Identity / EF / JWT (.NET $major)" $commonVersions
     $postgresVersion = Read-PackageVersion "PostgreSQL / Supabase (EF $major)" @(Get-PackageVersions 'Npgsql.EntityFrameworkCore.PostgreSQL' | Where-Object { $_ -match "^$major\." })
+    $mysqlVersion = Read-PackageVersion "MySQL (.NET $major / EF $microsoftVersion)" @(Get-CompatibleMySqlVersions $framework $microsoftVersion)
     $fluentVersions = @(Get-PackageVersions 'FluentValidation' | Where-Object { $_ -match '^12\.' })
     $fluentDiVersions = @(Get-PackageVersions 'FluentValidation.DependencyInjectionExtensions')
     $fluentVersion = Read-PackageVersion 'FluentValidation' @($fluentVersions | Where-Object { $fluentDiVersions -contains $_ })
@@ -250,6 +279,7 @@ try {
     $plan = @(
         @{ Project = $infra; Id = $microsoftIds[0]; Version = $microsoftVersion },
         @{ Project = $infra; Id = $microsoftIds[1]; Version = $microsoftVersion },
+        @{ Project = $infra; Id = 'MySql.EntityFrameworkCore'; Version = $mysqlVersion },
         @{ Project = $infra; Id = 'Npgsql.EntityFrameworkCore.PostgreSQL'; Version = $postgresVersion },
         @{ Project = $app; Id = 'FluentValidation'; Version = $fluentVersion },
         @{ Project = $api; Id = 'FluentValidation.DependencyInjectionExtensions'; Version = $fluentVersion },
@@ -297,7 +327,7 @@ try {
     foreach ($entry in $plan) { Write-Host "  $($entry.Project.Name): $($entry.Id) $($entry.Version)" }
     if ($existingSwagger) { Write-Host '  Swagger ya instalado: se conserva.' -ForegroundColor Green }
     Write-Host "  Herramienta local: dotnet-ef $microsoftVersion"
-    Write-Host '  Bases de datos: SQL Server y PostgreSQL (Supabase).' -ForegroundColor Cyan
+    Write-Host '  Bases de datos: SQL Server, MySQL y PostgreSQL (Supabase).' -ForegroundColor Cyan
     Write-Host '  AES-GCM, SHA y HMAC: incluidos en .NET, sin otro NuGet.' -ForegroundColor Cyan
     Write-Host '  AutoMapper: revisar la licencia al configurarlo.' -ForegroundColor Yellow
 
@@ -313,6 +343,11 @@ try {
         $probePath = Join-Path $roleFolder 'Compatibilidad.csproj'
         [IO.File]::WriteAllText($probePath, $probeProject, [Text.UTF8Encoding]::new($false))
         Invoke-Dotnet -Arguments @('restore', $probePath, '--source', $nugetSource, '--verbosity', 'quiet') | Out-Null
+        if ($roleProject.Path -eq $infra.Path) {
+            $providerProbe = 'using Microsoft.EntityFrameworkCore; public static class ProviderCompatibility { public static void Configure() { new DbContextOptionsBuilder<DbContext>().UseSqlServer("Server=localhost;Database=Probe;Integrated Security=true"); new DbContextOptionsBuilder<DbContext>().UseMySQL("Server=localhost;Database=Probe;User ID=probe;Password=probe"); new DbContextOptionsBuilder<DbContext>().UseNpgsql("Host=localhost;Database=probe;Username=probe;Password=probe"); } }'
+            [IO.File]::WriteAllText((Join-Path $roleFolder 'ProviderProbe.cs'), $providerProbe, [Text.UTF8Encoding]::new($false))
+            Invoke-Dotnet -Arguments @('build', $probePath, '--no-restore', '--nologo', '--verbosity', 'quiet') | Out-Null
+        }
         if ($roleProject.Path -eq $app.Path) {
             $mapperProbe = 'public class Source { public int Id { get; set; } } public class Destination { public int Id { get; set; } } [Riok.Mapperly.Abstractions.Mapper] public partial class CompatibilityMapper { public partial Destination Map(Source source); }'
             [IO.File]::WriteAllText((Join-Path $roleFolder 'MapperProbe.cs'), $mapperProbe, [Text.UTF8Encoding]::new($false))
